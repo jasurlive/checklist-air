@@ -154,7 +154,7 @@ def parse_time(t: str) -> str:
 def format_event(t1: str | None, t2: str | None) -> str:
     """How a timeline value is written on the sheet: 0750/0759, 0800 or /0820."""
     if t1 and t2:
-        return f"{t1}/{t2}"
+        return f"{t1} / {t2}"
     if t2:
-        return f"/{t2}"
+        return f" / {t2}"
     return t1 or ""
