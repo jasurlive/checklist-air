@@ -40,6 +40,7 @@ class St(StatesGroup):
     field = State()      # editing one header field
     time = State()       # typing a time manually
     remarks = State()    # typing remarks
+    infants = State()    # asking for infants after a PAX number
 
 
 # --- helpers ---------------------------------------------------------------------
@@ -235,7 +236,8 @@ async def cb_flight(cq: CallbackQuery, callback_data: V.Cb, state: FSMContext, d
         recent = await db.recent_values(uid, key)
         await cq.message.answer(
             f"{t(lang, 'current', value=escape(flight.get(key) or '—'))}\n{V.prompt_for(lang, key)}",
-            reply_markup=V.input_menu(lang, suggestions_for(lang, key, recent), clear=key not in F.REQUIRED),
+            reply_markup=V.input_menu(lang, suggestions_for(lang, key, recent), clear=key not in F.REQUIRED,
+                                      nil=key in F.NIL_FIELDS, dash=key in F.DASH_FIELDS),
         )
 
     elif a == "docs":
@@ -274,6 +276,13 @@ async def cb_flight(cq: CallbackQuery, callback_data: V.Cb, state: FSMContext, d
         _, pair = F.EVENT_BY_KEY[key]
         name = label(lang, key) + (f" — {part(lang, pair[which - 1])}" if pair else "")
         await cq.message.answer(t(lang, "time_prompt", label=name), reply_markup=V.input_menu(lang, []))
+
+    elif a == "tdash" and key in F.EVENT_BY_KEY:
+        await db.clear_time(fid, key)
+        await db.set_time(fid, key, 1, F.DASH)
+        times = await db.get_times(fid)
+        await safe_edit(cq, t(lang, "timeline_text"), V.timeline_kb(lang, fid, times))
+        toast = f"{label(lang, key)}: {F.DASH_PRINT}"
 
     elif a == "tclr" and key in F.EVENT_BY_KEY:
         await db.clear_time(fid, key)
@@ -335,18 +344,51 @@ async def field_input(msg: Message, state: FSMContext, db: Database, lang: str):
         return
     key = data["key"]
     kind = F.HEADER[key][2]
-    if msg.text in all_variants("btn_clear") and key not in F.REQUIRED:
+    text = msg.text.strip()
+    if text in all_variants("btn_clear") and key not in F.REQUIRED:
         value = None
+    elif key in F.NIL_FIELDS and (text in all_variants("btn_nil") or text.upper() == F.NIL):
+        value = F.NIL
+    elif key in F.DASH_FIELDS and (text in all_variants("btn_dash") or set(text) <= {"-", "—", "–"}):
+        value = F.DASH
     else:
         try:
-            value = parse_input(kind, msg.text)
+            value = parse_input(kind, text)
         except ValueError:
             await msg.answer(t(lang, "invalid", hint=hint(lang, kind, key)))
             return
+        if key in F.INFANT_FIELDS and "+" not in value:
+            await state.set_state(St.infants)
+            await state.update_data(pax=value)
+            await msg.answer(t(lang, "infants_q", label=label(lang, key), pax=value),
+                             reply_markup=V.infants_menu(lang))
+            return
+    await save_field(msg, state, db, lang, fid, key, value)
+
+
+async def save_field(msg: Message, state: FSMContext, db: Database, lang: str, fid: int, key: str,
+                     value: str | None):
     await db.set_field(fid, msg.from_user.id, key, value)
-    await back_to_menu(msg, state, lang, t(lang, "field_saved", label=label(lang, key), value=escape(value or "—")))
+    shown = F.DASH_PRINT if value == F.DASH else (value or "—")
+    await back_to_menu(msg, state, lang, t(lang, "field_saved", label=label(lang, key), value=escape(shown)))
     flight = await db.get_flight(fid, msg.from_user.id)
     await msg.answer(t(lang, "header_title"), reply_markup=V.header_kb(lang, flight))
+
+
+@router.message(St.infants, Filter.text)
+async def infants_input(msg: Message, state: FSMContext, db: Database, lang: str):
+    fid, data = await _fid_or_reset(msg, state, db, lang)
+    if not fid:
+        return
+    text = msg.text.strip()
+    if text in all_variants("btn_no_infants"):
+        infants = 0
+    elif text.isdigit() and len(text) <= 3:
+        infants = int(text)
+    else:
+        await msg.answer(t(lang, "invalid", hint=t(lang, "hint_infants")))
+        return
+    await save_field(msg, state, db, lang, fid, data["key"], F.with_infants(data["pax"], infants))
 
 
 @router.message(St.time, Filter.text)

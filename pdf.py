@@ -22,6 +22,19 @@ BASE = Path(__file__).parent
 TEMPLATE = BASE / "template" / "cover_sheet.xlsx"
 EMU_PER_PT = 12700
 
+# Text styles. The title keeps the template's own font, in black.
+# Printed labels (everything else in the template) are bold, in the blue of the logo.
+# Values filled in from the bot are a bit larger, in ballpoint-pen blue, so they read as handwriting.
+TITLE_CELLS = {"C1"}
+TITLE_SIZE = 15.0
+TITLE_COLOR = (0, 0, 0)
+LABEL_COLOR = (0x00 / 255, 0x6F / 255, 0xB9 / 255)  # #006FB9, sampled from the logo
+LABEL_SIZE = 12.0
+VALUE_COLOR = (0x1A / 255, 0x2E / 255, 0x9E / 255)  # #1A2E9E, pen blue
+VALUE_SIZE = 15.0
+# A value too long for its cell is shrunk, but never below this.
+MIN_FONT = 7.0
+
 # Excel font name -> (regular, bold) TTF. Carlito is metric-compatible with Calibri.
 _FONT_FILES = {
     "Calibri": ("Carlito-Regular.ttf", "Carlito-Bold.ttf"),
@@ -41,9 +54,10 @@ def _font(cell_font) -> tuple[str, float]:
 def fill_template(flight: dict, checks: dict, times: dict, signature: str):
     """Return an openpyxl worksheet with the flight's data written in."""
     ws = load_workbook(TEMPLATE).active
+    before = {c.coordinate for row in ws.iter_rows() for c in row if c.value not in (None, "")}
     for key, (_, cell, _) in F.HEADER.items():
         if flight.get(key):
-            ws[cell] = flight[key]
+            ws[cell] = F.DASH_PRINT if flight[key] == F.DASH else flight[key]
     for i, (key, _) in enumerate(F.CHECKLIST):
         col = F.CHECK_COLUMNS.get(checks.get(key))
         if col:
@@ -54,19 +68,38 @@ def fill_template(flight: dict, checks: dict, times: dict, signature: str):
     if flight.get("remarks"):
         _fill_remarks(ws, flight["remarks"])
     ws[F.SIGNATURE_CELL] = signature
+    # Name on the left, leaving room on the right for a handwritten signature.
+    sig = ws[F.SIGNATURE_CELL]
+    sig.alignment = sig.alignment.copy(horizontal="left")
+    # Everything that was not printed on the template is a filled-in value.
+    ws.filled_cells = {c.coordinate for row in ws.iter_rows() for c in row
+                       if c.value not in (None, "")} - before
     return ws
 
 
 def _fill_remarks(ws, text: str):
+    # Wrap at the value size; if the text is too long for the lines, wrap smaller (drawn smaller too).
+    for size in (VALUE_SIZE, LABEL_SIZE):
+        lines = _wrap_remarks(ws, text, size)
+        if len(lines) <= len(F.REMARK_LINES):
+            break
+    cells = F.REMARK_LINES
+    if len(lines) > len(cells):
+        lines = lines[: len(cells)]
+        lines[-1] = lines[-1][:-1] + "…"
+    for cell, line in zip(cells, lines):
+        ws[cell] = line or None
+
+
+def _wrap_remarks(ws, text: str, size: float) -> list[str]:
     geo = _Geometry(ws)
     lines: list[str] = []
     cells = F.REMARK_LINES
     for para in text.splitlines() or [""]:
-        words = para.split()
         current = ""
-        for word in words:
+        for word in para.split():
             cell = cells[min(len(lines), len(cells) - 1)]
-            font, size = _font(ws[cell].font)
+            font = _font(ws[cell].font)[0].removesuffix("-Bold")
             trial = f"{current} {word}".strip()
             if pdfmetrics.stringWidth(trial, font, size) <= geo.cell_width(cell) - 6:
                 current = trial
@@ -74,11 +107,7 @@ def _fill_remarks(ws, text: str):
                 lines.append(current)
                 current = word
         lines.append(current)
-    if len(lines) > len(cells):
-        lines = lines[: len(cells)]
-        lines[-1] = lines[-1][:-1] + "…"
-    for cell, line in zip(cells, lines):
-        ws[cell] = line or None
+    return lines
 
 
 # --- Rendering ----------------------------------------------------------------
@@ -198,14 +227,58 @@ def _draw_borders(pdf, g, cell, r, c):
     pdf.setDash([])
 
 
+def _fit(text, font, size, width, height, wrap):
+    """Keep the size if the text fits on one line, or wrapped (labels only); else shrink.
+
+    Returns (size, lines, line spacing factor).
+    """
+    while True:
+        if pdfmetrics.stringWidth(text, font, size) <= width and "\n" not in text:
+            return size, [text], 1.15
+        if wrap:
+            lines = _wrap(text, font, size, width)
+            widest = max(pdfmetrics.stringWidth(line, font, size) for line in lines)
+            if widest <= width and size * len(lines) <= height:
+                return size, lines, (1.15 if size * 1.15 * len(lines) <= height else 1.0)
+        if size <= MIN_FONT:
+            return size, [text], 1.15
+        size = max(MIN_FONT, size - 0.25)
+
+
+def _style(ws, cell) -> tuple[str, float, tuple]:
+    """(font, size, colour) for a cell: title, filled-in value or printed label."""
+    font, size = _font(cell.font)
+    family = font.removesuffix("-Bold")
+    if cell.coordinate in TITLE_CELLS:
+        return font, TITLE_SIZE, TITLE_COLOR
+    if cell.coordinate in getattr(ws, "filled_cells", ()):
+        return family, VALUE_SIZE, VALUE_COLOR
+    return f"{family}-Bold", LABEL_SIZE, LABEL_COLOR
+
+
 def _draw_text(pdf, g, cell, r, c):
     x1, y1, x2, y2 = g.span(r, c)
-    font, size = _font(cell.font)
+    font, size, color = _style(g.ws, cell)
     al = cell.alignment
     pad = 3
     text = str(cell.value)
-    lines = _wrap(text, font, size, x2 - x1 - 2 * pad) if al.wrap_text else [text]
-    line_h = size * 1.15
+    pdf.setFillColorRGB(*color)
+    pdf.setStrokeColorRGB(*color)
+
+    if text == F.DASH_PRINT:  # "not applicable": a long dash across the middle of the cell
+        y, half = (y1 + y2) / 2, min((x2 - x1) * 0.3, 30)
+        if al.horizontal == "center":
+            mid = (x1 + x2) / 2
+        else:
+            mid = x1 + pad + half
+        pdf.setLineWidth(1.2)
+        pdf.line(mid - half, y, mid + half, y)
+        pdf.setStrokeColorRGB(0, 0, 0)
+        return
+
+    is_label = color == LABEL_COLOR
+    size, lines, spacing = _fit(text, font, size, x2 - x1 - 2 * pad, y2 - y1 - 2, al.wrap_text or is_label)
+    line_h = size * spacing
     block_h = line_h * len(lines)
     if al.vertical == "top":
         base = y1 + pad + size * 0.8
@@ -214,9 +287,6 @@ def _draw_text(pdf, g, cell, r, c):
     else:  # Excel default: bottom
         base = y2 - pad - block_h + size * 0.8
 
-    color = cell.font.color
-    rgb = color.rgb if color is not None and isinstance(color.rgb, str) else "FF000000"
-    pdf.setFillColorRGB(*(int(rgb[i:i + 2], 16) / 255 for i in (2, 4, 6)))
     for i, line in enumerate(lines):
         y = base + i * line_h
         w = pdfmetrics.stringWidth(line, font, size)
@@ -233,6 +303,7 @@ def _draw_text(pdf, g, cell, r, c):
         pdf.setFont(font, size)
         pdf.drawString(0, 0, line)
         pdf.restoreState()
+    pdf.setStrokeColorRGB(0, 0, 0)
 
 
 def _draw_image(pdf, g, img):

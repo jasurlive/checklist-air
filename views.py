@@ -25,14 +25,27 @@ def main_menu(lang: str) -> ReplyKeyboardMarkup:
     return kb.as_markup(resize_keyboard=True)
 
 
-def input_menu(lang: str, suggestions: list[str], skip: bool = False, clear: bool = False) -> ReplyKeyboardMarkup:
+def input_menu(lang: str, suggestions: list[str], skip: bool = False, clear: bool = False,
+               nil: bool = False, dash: bool = False) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
+    suggestions = [s for s in suggestions if s not in (F.NIL, F.DASH)]
     for s in suggestions:
         kb.button(text=s)
-    extra = (["btn_skip"] if skip else []) + (["btn_clear"] if clear else []) + ["btn_cancel"]
+    extra = ((["btn_nil"] if nil else []) + (["btn_dash"] if dash else []) + (["btn_skip"] if skip else [])
+             + (["btn_clear"] if clear else []) + ["btn_cancel"])
     for e in extra:
         kb.button(text=t(lang, e))
     kb.adjust(*([2] * ((len(suggestions) + 1) // 2)), len(extra))
+    return kb.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+
+def infants_menu(lang: str) -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardBuilder()
+    kb.button(text=t(lang, "btn_no_infants"))
+    for n in range(1, 7):
+        kb.button(text=str(n))
+    kb.button(text=t(lang, "btn_cancel"))
+    kb.adjust(1, 6, 1)
     return kb.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
 
@@ -65,8 +78,13 @@ def prompt_for(lang: str, key: str) -> str:
 
 
 # --- flight card ---------------------------------------------------------------
+def show(value: str | None) -> str:
+    """A stored value as shown in chat (the dash sentinel is drawn long, like on the PDF)."""
+    return F.DASH_PRINT if value == F.DASH else (value or "—")
+
+
 def _v(flight, key) -> str:
-    return escape(flight.get(key) or "—")
+    return escape(show(flight.get(key)))
 
 
 def card_text(lang: str, flight: dict, checks: dict, times: dict) -> str:
@@ -108,7 +126,7 @@ def flights_kb(flights: list[dict]) -> InlineKeyboardMarkup:
 def header_kb(lang: str, flight: dict) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for key in F.HEADER:
-        kb.button(text=f"{label(lang, key)}: {flight.get(key) or '—'}",
+        kb.button(text=f"{label(lang, key)}: {show(flight.get(key))}",
                   callback_data=Cb(a="hset", id=flight["id"], k=key))
     back_btn(kb, lang, flight["id"])
     kb.adjust(2)
@@ -129,6 +147,9 @@ def timeline_kb(lang: str, fid: int, times: dict) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for key, _, pair in F.EVENTS:
         t1, t2 = times.get(key, (None, None))
+        if t1 == F.DASH:
+            kb.button(text=f"➖ {label(lang, key)}: {F.DASH_PRINT}", callback_data=Cb(a="ev", id=fid, k=key))
+            continue
         if pair:
             val = f"{t1 or '····'}–{t2 or '····'}" if (t1 or t2) else "—"
         else:
@@ -143,6 +164,8 @@ def timeline_kb(lang: str, fid: int, times: dict) -> InlineKeyboardMarkup:
 def event_text(lang: str, key: str, times: dict) -> str:
     _, pair = F.EVENT_BY_KEY[key]
     t1, t2 = times.get(key, (None, None))
+    if t1 == F.DASH:
+        return f"⏱ <b>{label(lang, key)}</b>\n{F.DASH_PRINT}"
     if pair:
         return (f"⏱ <b>{label(lang, key)}</b>\n{part(lang, pair[0])}: {t1 or '—'}\n"
                 f"{part(lang, pair[1])}: {t2 or '—'}")
@@ -161,6 +184,7 @@ def event_kb(lang: str, fid: int, key: str) -> InlineKeyboardMarkup:
     else:
         kb.button(text=t(lang, "b_now"), callback_data=Cb(a="now", id=fid, k=key, w=1))
         kb.button(text=t(lang, "b_enter_time"), callback_data=Cb(a="tset", id=fid, k=key, w=1))
+    kb.button(text=t(lang, "b_dash"), callback_data=Cb(a="tdash", id=fid, k=key))
     kb.button(text=t(lang, "b_clear"), callback_data=Cb(a="tclr", id=fid, k=key))
     back_btn(kb, lang, fid, action="tl")
     kb.adjust(2)

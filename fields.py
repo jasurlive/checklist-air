@@ -31,14 +31,27 @@ HEADER = {
     "park":    ("PARK POSITION",     "I7",  "text"),
     "std":     ("STD",               "B8",  "time"),
     "delay":   ("DELAY",             "I8",  "text"),
-    "pax_in":  ("PAX IN",            "B9",  "int"),
-    "pax_out": ("PAX OUT",           "D9",  "int"),
+    "pax_in":  ("PAX IN",            "B9",  "pax"),
+    "pax_out": ("PAX OUT",           "D9",  "pax"),
     "trs":     ("TRS.PX",            "I9",  "int"),
     "cgo_in":  ("CGO IN",            "B10", "text"),
     "cgo_out": ("CGO OUT",           "D10", "text"),
     "bag_in":  ("BAG IN",            "B11", "text"),
     "bag_out": ("BAG OUT",           "D11", "text"),
 }
+
+# Special values. NIL = nothing carried; DASH = not applicable (printed as a long dash).
+NIL = "NIL"
+DASH = "—"
+DASH_PRINT = "——————"
+NIL_FIELDS = {"pax_in", "pax_out", "trs", "cgo_in", "cgo_out", "bag_in", "bag_out"}
+DASH_FIELDS = {"delay"}
+INFANT_FIELDS = {"pax_in", "pax_out"}
+
+
+def with_infants(pax: str, infants: int) -> str:
+    """'123' + 3 -> '123+3'; no infants -> '123'."""
+    return f"{pax}+{infants}" if infants else pax
 
 # Asked one after another when a new flight is created; the rest is edited later.
 WIZARD = ["date", "flight", "from_st", "to_st", "ac", "sta", "std", "park"]
@@ -135,10 +148,11 @@ def parse_value(kind: str, text: str) -> str:
         if not re.fullmatch(r"[A-Za-z0-9]{2,3}\s?\d{1,4}[A-Za-z]?(\s?/\s?\d{1,4}[A-Za-z]?)?", t):
             raise ValueError("flight")
         return re.sub(r"\s", "", t).upper()
-    if kind == "int":
-        if not re.fullmatch(r"\d{1,4}", t):
-            raise ValueError("int")
-        return str(int(t))
+    if kind in ("int", "pax"):
+        m = re.fullmatch(r"(\d{1,4})(?:\s*\+\s*(\d{1,3}))?" if kind == "pax" else r"(\d{1,4})()", t)
+        if not m:
+            raise ValueError(kind)
+        return with_infants(str(int(m[1])), int(m[2] or 0))
     if not t or len(t) > 40:
         raise ValueError("text")
     return t
@@ -152,7 +166,9 @@ def parse_time(t: str) -> str:
 
 
 def format_event(t1: str | None, t2: str | None) -> str:
-    """How a timeline value is written on the sheet: 0750/0759, 0800 or /0820."""
+    """How a timeline value is written on the sheet: 0750/0759, 0800, /0820 or a dash."""
+    if t1 == DASH:
+        return DASH_PRINT
     if t1 and t2:
         return f"{t1} / {t2}"
     if t2:
